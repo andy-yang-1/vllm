@@ -56,6 +56,8 @@ BlockTable = List[PhysicalTokenBlock]
 class BlockSpaceManager:
     """Manages the mapping between logical and physical token blocks."""
 
+    discard_queue = []
+
     def __init__(
         self,
         block_size: int,

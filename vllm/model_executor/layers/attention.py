@@ -1,5 +1,5 @@
 """Multi-head attention."""
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 
 import torch
 import torch.nn as nn
@@ -8,6 +8,7 @@ from xformers import ops as xops
 from vllm import attention_ops
 from vllm import cache_ops
 from vllm import pos_encoding_ops
+from vllm.core.block_manager import BlockSpaceManager
 from vllm.model_executor.input_metadata import InputMetadata
 
 _SUPPORTED_HEAD_SIZES = [64, 80, 96, 128]
@@ -40,7 +41,7 @@ def modified_single_query_cached_kv_attention(
     value_cache: torch.Tensor,
     block_tables: torch.Tensor,
     context_lens: torch.Tensor,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, List[int]]:
     num_heads = value_cache.shape[1]
     head_size = value_cache.shape[2]
     block_size = value_cache.shape[3]
@@ -75,10 +76,10 @@ def modified_single_query_cached_kv_attention(
         output[i].copy_(out, non_blocking=True)
 
         # min_indexes.append(indexes[int(min_index)])
-        min_indexes.append(torch.tensor(indexes[int(min_index)]))
+        min_indexes.append(indexes[int(min_index)])
 
 
-    min_indexes = torch.stack(min_indexes, dim=0)
+    # min_indexes = torch.stack(min_indexes, dim=0)
     return output, min_indexes
 
 
@@ -151,18 +152,29 @@ class PagedAttention(nn.Module):
         value_cache: torch.Tensor,      # [num_blocks, num_heads, head_size, block_size]
         input_metadata: InputMetadata,
     ) -> None:
-        block_size = value_cache.shape[3]
-        attention_ops.single_query_cached_kv_attention(
+        # block_size = value_cache.shape[3]
+        # attention_ops.single_query_cached_kv_attention(
+        #     output,
+        #     query,
+        #     key_cache,
+        #     value_cache,
+        #     self.scale,
+        #     input_metadata.block_tables,
+        #     input_metadata.context_lens,
+        #     block_size,
+        #     input_metadata.max_context_len,
+        # )
+
+        _, slot_index = modified_single_query_cached_kv_attention(
             output,
             query,
             key_cache,
             value_cache,
-            self.scale,
             input_metadata.block_tables,
             input_metadata.context_lens,
-            block_size,
-            input_metadata.max_context_len,
         )
+
+        BlockSpaceManager.discard_queue.extend(slot_index)
 
     def forward(
         self,

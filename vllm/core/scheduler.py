@@ -292,6 +292,9 @@ class Scheduler:
         self,
         seq_outputs: Dict[int, SequenceOutputs],
     ) -> List[SequenceGroup]:
+        
+        # print("discarded_slot_index: ", BlockSpaceManager.discard_queue)
+        
         # Update the running sequences and free blocks.
         for seq_group in self.running:
             # Process beam search results before processing the new tokens.
