@@ -6,78 +6,10 @@ from xformers import ops as xops
 from xformers.ops.fmha.attn_bias import BlockDiagonalCausalMask
 
 from vllm import attention_ops
+from vllm.model_executor.layers.attention import modified_single_query_cached_kv_attention
 
 MAX_SEQ_LEN = 4096
 TEST_SEED = 0
-
-
-def modified_masked_attention(
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    scale: float,
-    attn_mask: Optional[torch.Tensor] = None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    query = query * scale
-    attn = torch.einsum('qhd,khd->hqk', query, key)
-    if attn_mask is not None:
-        attn = attn + attn_mask
-    attn = torch.softmax(attn, dim=-1)
-    out = torch.einsum('hqk,khd->qhd', attn, value)
-
-    # Find the minimum value in attn and its index
-    attn_scores_summed = torch.sum(attn, dim=0)
-    min_value, min_index = torch.min(attn_scores_summed, dim=-1)
-    return out, min_index
-
-
-def modified_single_query_cached_kv_attention(
-    output: torch.Tensor,
-    query: torch.Tensor,
-    key_cache: torch.Tensor,
-    value_cache: torch.Tensor,
-    block_tables: torch.Tensor,
-    context_lens: torch.Tensor,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    num_heads = value_cache.shape[1]
-    head_size = value_cache.shape[2]
-    block_size = value_cache.shape[3]
-
-    num_input_tokens = query.shape[0]
-    min_indexes = []
-    for i in range(num_input_tokens):
-        q = query[i].unsqueeze(0)
-        block_table = block_tables[i]
-        context_len = int(context_lens[i])
-
-        keys = []
-        values = []
-        indexes = []
-        for j in range(context_len):
-            block_number = int(block_table[j // block_size])
-            block_offset = j % block_size
-
-            k = key_cache[block_number, :, :, block_offset, :]
-            k = k.reshape(num_heads, head_size)
-            keys.append(k)
-
-            v = value_cache[block_number, :, :, block_offset]
-            values.append(v)
-            indexes.append(block_number * block_size + block_offset)
-        keys = torch.stack(keys, dim=0)
-        values = torch.stack(values, dim=0)
-
-        scale = 1.0 / (head_size ** 0.5)
-        out, min_index = modified_masked_attention(q, keys, values, scale)
-        out = out.view(num_heads, head_size)
-        output[i].copy_(out, non_blocking=True)
-
-        # min_indexes.append(indexes[int(min_index)])
-        min_indexes.append(torch.tensor(indexes[int(min_index)]))
-
-
-    min_indexes = torch.stack(min_indexes, dim=0)
-    return output, min_indexes
 
 
 def ref_masked_attention(
@@ -398,6 +330,7 @@ def run_modified_single_query_cached_kv_attention(
         block_tables,
         context_lens,
     )
+    print(indexes)
     # NOTE(woosuk): Due to the difference in the data types the two
     # implementations use for attention softmax logits and accumulation,
     # there is a small difference in the final outputs.
