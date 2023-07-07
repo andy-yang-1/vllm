@@ -417,9 +417,9 @@ void single_query_cached_kv_attention_launcher(
 // 1, 2, 4, 64, 128, 256.
 #define CALL_KERNEL_LAUNCHER_BLOCK_SIZE(T)                          \
   switch (block_size) {                                             \
-    /* case 1:                         */                           \
-    /*   CALL_KERNEL_LAUNCHER(T, 1);   */                           \
-    /*   break;                        */                           \
+    case 1:                                                         \
+      CALL_KERNEL_LAUNCHER(T, 1);                                   \
+      break;                                                        \
     /* case 2:                         */                           \
     /*   CALL_KERNEL_LAUNCHER(T, 2);   */                           \
     /*   break;                        */                           \

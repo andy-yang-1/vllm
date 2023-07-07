@@ -293,8 +293,8 @@ class Scheduler:
         seq_outputs: Dict[int, SequenceOutputs],
     ) -> List[SequenceGroup]:
         
-        # print("discarded_slot_index: ", BlockSpaceManager.discard_queue)
-        
+        print("discarded_slot_index: ", BlockSpaceManager.discard_queue)
+
         # Update the running sequences and free blocks.
         for seq_group in self.running:
             # Process beam search results before processing the new tokens.
@@ -316,6 +316,10 @@ class Scheduler:
                 seq.append_token_id(output.output_token, output.logprobs)
         # Return a shallow copy of the running queue to prevent the queue
         # from being modified by the caller.
+
+        # Free discarded blocks
+        self.free_discarded_block()
+        
         return self.running.copy()
 
     def free_seq(self, seq: Sequence, finish_status: SequenceStatus) -> None:
@@ -426,3 +430,36 @@ class Scheduler:
         blocks_to_swap_out.update(mapping)
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
             seq.status = SequenceStatus.SWAPPED
+
+    def free_discarded_block(self):
+        # Iterate over the discard_queue.
+        for seq_id, block_idx in BlockSpaceManager.discard_queue:
+            # Get the corresponding sequence from the seq_data.
+            seq = None
+            flag = False
+            for seq_group in self.running:
+                for s in seq_group.get_seqs(SequenceStatus.RUNNING):
+                    if s.seq_id == seq_id:
+                        seq = s
+                        flag = True
+                        break
+                if flag:
+                    break
+            assert seq is not None, f"Sequence with id {seq_id} not found."
+
+            # Get the logical block to be discarded.
+            discard_block = seq.logical_token_blocks[block_idx]
+
+            # Remove the block from the sequence's logical blocks.
+            seq.logical_token_blocks.remove(discard_block)
+
+            # Free the corresponding physical block.
+            freed_block = self.block_manager.block_tables[seq_id][block_idx]
+            self.block_manager.block_tables[seq_id].remove(freed_block)
+            self.block_manager.gpu_allocator.free(freed_block)
+
+
+        # Clear the discard_queue.
+        BlockSpaceManager.discard_queue.clear()
+
+

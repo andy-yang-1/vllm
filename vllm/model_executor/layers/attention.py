@@ -55,7 +55,7 @@ def modified_single_query_cached_kv_attention(
 
         keys = []
         values = []
-        indexes = []
+        # indexes = []
         for j in range(context_len):
             block_number = int(block_table[j // block_size])
             block_offset = j % block_size
@@ -66,7 +66,7 @@ def modified_single_query_cached_kv_attention(
 
             v = value_cache[block_number, :, :, block_offset]
             values.append(v)
-            indexes.append(block_number * block_size + block_offset)
+            # indexes.append(block_number * block_size + block_offset)
         keys = torch.stack(keys, dim=0)
         values = torch.stack(values, dim=0)
 
@@ -76,7 +76,7 @@ def modified_single_query_cached_kv_attention(
         output[i].copy_(out, non_blocking=True)
 
         # min_indexes.append(indexes[int(min_index)])
-        min_indexes.append(indexes[int(min_index)])
+        min_indexes.append(int(min_index))
 
 
     # min_indexes = torch.stack(min_indexes, dim=0)
@@ -165,7 +165,8 @@ class PagedAttention(nn.Module):
         #     input_metadata.max_context_len,
         # )
 
-        _, slot_index = modified_single_query_cached_kv_attention(
+        discard_const = 20
+        _, indexs = modified_single_query_cached_kv_attention(
             output,
             query,
             key_cache,
@@ -174,7 +175,16 @@ class PagedAttention(nn.Module):
             input_metadata.context_lens,
         )
 
-        BlockSpaceManager.discard_queue.extend(slot_index)
+        seq_ids = list(input_metadata.seq_data.keys())
+
+        for i in range(len(seq_ids)):
+            seq_id = seq_ids[i]
+            seq_data = input_metadata.seq_data[seq_id]
+            index = indexs[i]
+            if seq_data.get_len() > discard_const:
+                print("discard: ", seq_id, index)
+                BlockSpaceManager.discard_queue.append((seq_id, index))
+                    
 
     def forward(
         self,

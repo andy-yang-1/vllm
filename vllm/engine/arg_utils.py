@@ -21,7 +21,7 @@ class EngineArgs:
     worker_use_ray: bool = False
     pipeline_parallel_size: int = 1
     tensor_parallel_size: int = 1
-    block_size: int = 16
+    block_size: int = 1
     swap_space: int = 4  # GiB
     gpu_memory_utilization: float = 0.90
     max_num_batched_tokens: int = 2560
