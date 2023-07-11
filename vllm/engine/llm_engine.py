@@ -106,7 +106,7 @@ class LLMEngine:
         self._init_cache()
 
         # Create the scheduler.
-        self.scheduler = Scheduler(scheduler_config, cache_config, log_stats)
+        self.scheduler = Scheduler(scheduler_config, cache_config, log_stats, model_config, parallel_config)
 
     def _verify_args(self) -> None:
         self.model_config.verify_with_parallel_config(self.parallel_config)
@@ -260,6 +260,7 @@ class LLMEngine:
         """Decodes the sequence outputs."""
         for seq_group in seq_groups:
             for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
+                # TODO (andy): new output text is full text?
                 new_token, new_output_text = detokenize_incrementally(
                     self.tokenizer,
                     seq.output_tokens,

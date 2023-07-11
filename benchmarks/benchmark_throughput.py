@@ -186,7 +186,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Benchmark the throughput.")
     parser.add_argument("--backend", type=str, choices=["vllm", "hf"],
                         default="vllm")
-    parser.add_argument("--dataset", type=str, required=True,
+    parser.add_argument("--dataset", type=str, default="/home/ec2-user/speed/ShareGPT_V3_unfiltered_cleaned_split.json",
                         help="Path to the dataset.")
     parser.add_argument("--model", type=str, default="facebook/opt-125m")
     parser.add_argument("--tokenizer", type=str, default=None)

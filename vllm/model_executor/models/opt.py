@@ -59,6 +59,7 @@ class OPTAttention(nn.Module):
         embed_dim: int,
         num_heads: int,
         bias: bool = True,
+        layer_id: int = None,
     ) -> None:
         super().__init__()
         self.embed_dim = embed_dim
@@ -68,6 +69,7 @@ class OPTAttention(nn.Module):
         self.num_heads = total_num_heads // tensor_model_parallel_world_size
         self.head_dim = embed_dim // total_num_heads
         self.scaling = self.head_dim ** -0.5
+        self.layer_id = layer_id
 
         self.qkv_proj = ColumnParallelLinear(embed_dim, 3 * embed_dim, bias=bias,
                                              gather_output=False,
@@ -76,7 +78,7 @@ class OPTAttention(nn.Module):
                                           input_is_parallel=True,
                                           perform_initialization=False)
         self.attn = PagedAttention(self.num_heads, self.head_dim,
-                                   scale=self.scaling)
+                                   scale=self.scaling, layer_id=self.layer_id)
 
     def forward(
         self,
@@ -96,14 +98,16 @@ class OPTAttention(nn.Module):
 
 class OPTDecoderLayer(nn.Module):
 
-    def __init__(self, config: OPTConfig):
+    def __init__(self, config: OPTConfig, layer_id: int = None):
         super().__init__()
         self.config = config
         self.embed_dim = config.hidden_size
+        self.layer_id = layer_id
         self.self_attn = OPTAttention(
             embed_dim=self.embed_dim,
             num_heads=config.num_attention_heads,
             bias=config.enable_bias,
+            layer_id=self.layer_id,
         )
         self.do_layer_norm_before = config.do_layer_norm_before
         self.activation_fn = get_act_fn(config.activation_function)
@@ -195,13 +199,13 @@ class OPTDecoder(nn.Module):
         else:
             self.final_layer_norm = None
 
-        self.layers = nn.ModuleList([OPTDecoderLayer(config) for _ in range(config.num_hidden_layers)])
+        self.layers = nn.ModuleList([OPTDecoderLayer(config, i) for i in range(config.num_hidden_layers)])
 
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[KVCache],
+        kv_cache: KVCache,
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
     ) -> torch.Tensor:
@@ -218,7 +222,7 @@ class OPTDecoder(nn.Module):
                 cache_event = cache_events[i]
             layer = self.layers[i]
             hidden_states = layer(
-                hidden_states, kv_caches[i], input_metadata, cache_event)
+                hidden_states, kv_cache, input_metadata, cache_event)
 
         if self.final_layer_norm is not None:
             hidden_states = self.final_layer_norm(hidden_states)
@@ -237,12 +241,12 @@ class OPTModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[KVCache],
+        kv_cache: KVCache,
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
     ) -> torch.Tensor:
         return self.decoder(
-            input_ids, positions, kv_caches, input_metadata, cache_events)
+            input_ids, positions, kv_cache, input_metadata, cache_events)
 
 
 class OPTForCausalLM(nn.Module):
@@ -260,12 +264,12 @@ class OPTForCausalLM(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[KVCache],
+        kv_cache: KVCache,
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
     ) -> Dict[int, SequenceOutputs]:
         hidden_states = self.model(
-            input_ids, positions, kv_caches, input_metadata, cache_events)
+            input_ids, positions, kv_cache, input_metadata, cache_events)
         next_tokens = self.sampler(
             self.lm_head_weight, hidden_states, input_metadata)
         return next_tokens

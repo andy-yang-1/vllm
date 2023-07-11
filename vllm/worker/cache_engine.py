@@ -67,26 +67,23 @@ class CacheEngine:
             self.block_size,
         )
 
-    def allocate_gpu_cache(self) -> List[KVCache]:
-        gpu_cache: List[KVCache] = []
+    def allocate_gpu_cache(self) -> KVCache:
         key_block_shape = self.get_key_block_shape()
         value_block_shape = self.get_value_block_shape()
-        for _ in range(self.num_layers):
-            key_blocks = torch.empty(
-                size=(self.num_gpu_blocks, *key_block_shape),
-                dtype=self.dtype,
-                device="cuda",
-            )
-            value_blocks = torch.empty(
-                size=(self.num_gpu_blocks, *value_block_shape),
-                dtype=self.dtype,
-                device="cuda",
-            )
-            gpu_cache.append((key_blocks, value_blocks))
-        return gpu_cache
+        # for _ in range(self.num_layers):
+        key_blocks = torch.empty(
+            size=(self.num_gpu_blocks, *key_block_shape),
+            dtype=self.dtype,
+            device="cuda",
+        )
+        value_blocks = torch.empty(
+            size=(self.num_gpu_blocks, *value_block_shape),
+            dtype=self.dtype,
+            device="cuda",
+        )
+        return (key_blocks, value_blocks)
 
-    def allocate_cpu_cache(self) -> List[KVCache]:
-        cpu_cache: List[KVCache] = []
+    def allocate_cpu_cache(self) -> KVCache:
         key_block_shape = self.get_key_block_shape()
         value_block_shape = self.get_value_block_shape()
         pin_memory = not in_wsl()
@@ -95,20 +92,19 @@ class CacheEngine:
             # https://docs.nvidia.com/cuda/wsl-user-guide/index.html#known-limitations-for-linux-cuda-applications
             logger.warn("Using 'pin_memory=False' as WSL is detected. "
                         "This may slow down the performance.")
-        for _ in range(self.num_layers):
-            key_blocks = torch.empty(
-                size=(self.num_cpu_blocks, *key_block_shape),
-                dtype=self.dtype,
-                pin_memory=pin_memory,
-            )
-            value_blocks = torch.empty(
-                size=(self.num_cpu_blocks, *value_block_shape),
-                dtype=self.dtype,
-                pin_memory=pin_memory,
-            )
-            cpu_cache.append((key_blocks, value_blocks))
-        return cpu_cache
+        key_blocks = torch.empty(
+            size=(self.num_cpu_blocks, *key_block_shape),
+            dtype=self.dtype,
+            pin_memory=pin_memory,
+        )
+        value_blocks = torch.empty(
+            size=(self.num_cpu_blocks, *value_block_shape),
+            dtype=self.dtype,
+            pin_memory=pin_memory,
+        )
+        return (key_blocks, value_blocks)
 
+    # TODO(andy): all swap related methods are not implemented yet.
     def _swap(
         self,
         src: List[KVCache],
@@ -152,7 +148,9 @@ class CacheEngine:
 
         key_cache_block = block_size * num_heads * head_size
         value_cache_block = key_cache_block
-        total = num_layers * (key_cache_block + value_cache_block)
+        # total = num_layers * (key_cache_block + value_cache_block)
+        # combine into one kv cache
+        total = 1 * (key_cache_block + value_cache_block)
         dtype_size = _get_dtype_size(model_config.dtype)
         return dtype_size * total
 

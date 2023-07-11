@@ -2,7 +2,7 @@ import enum
 import time
 from typing import Dict, List, Optional, Tuple
 
-from vllm.config import CacheConfig, SchedulerConfig
+from vllm.config import CacheConfig, SchedulerConfig, ModelConfig, ParallelConfig
 from vllm.core.block_manager import BlockSpaceManager
 from vllm.core.policy import PolicyFactory
 from vllm.logger import init_logger
@@ -55,10 +55,14 @@ class Scheduler:
         scheduler_config: SchedulerConfig,
         cache_config: CacheConfig,
         log_stats: bool,
+        model_config: ModelConfig,
+        parallel_config: ParallelConfig,
     ) -> None:
         self.scheduler_config = scheduler_config
         self.cache_config = cache_config
         self.log_stats = log_stats
+        self.model_config = model_config
+        self.parallel_config = parallel_config
 
         # Instantiate the scheduling policy.
         self.policy = PolicyFactory.get_policy(policy_name='fcfs')
@@ -67,6 +71,7 @@ class Scheduler:
             block_size=self.cache_config.block_size,
             num_gpu_blocks=self.cache_config.num_gpu_blocks,
             num_cpu_blocks=self.cache_config.num_cpu_blocks,
+            num_layers=self.model_config.get_num_layers(self.parallel_config)
         )
 
         # Sequence groups in the WAITING state.
@@ -276,7 +281,7 @@ class Scheduler:
             for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
                 seq_id = seq.seq_id
                 seq_data[seq_id] = seq.data
-                block_tables[seq_id] = self.block_manager.get_block_table(seq)
+                block_tables[seq_id] = self.block_manager.get_block_table_list(seq)
 
             seq_group_metadata = SequenceGroupMetadata(
                 request_id=seq_group.request_id,
@@ -293,7 +298,7 @@ class Scheduler:
         seq_outputs: Dict[int, SequenceOutputs],
     ) -> List[SequenceGroup]:
         
-        print("discarded_slot_index: ", BlockSpaceManager.discard_queue)
+        # print("discarded_slot_index: ", BlockSpaceManager.discard_queue)
 
         # Update the running sequences and free blocks.
         for seq_group in self.running:
@@ -318,7 +323,7 @@ class Scheduler:
         # from being modified by the caller.
 
         # Free discarded blocks
-        self.free_discarded_block()
+        # self.free_discarded_block()
         
         return self.running.copy()
 

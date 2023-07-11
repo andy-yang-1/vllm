@@ -64,11 +64,13 @@ class BlockSpaceManager:
         num_gpu_blocks: int,
         num_cpu_blocks: int,
         watermark: float = 0.01,
+        num_layers: int = 12 
     ) -> None:
         self.block_size = block_size
         self.num_total_gpu_blocks = num_gpu_blocks
         self.num_total_cpu_blocks = num_cpu_blocks
         self.watermark = watermark
+        self.num_layers = num_layers
         assert watermark >= 0.0
 
         self.watermark_blocks = int(watermark * num_gpu_blocks)
@@ -76,8 +78,8 @@ class BlockSpaceManager:
                                             num_gpu_blocks)
         self.cpu_allocator = BlockAllocator(Device.CPU, block_size,
                                             num_cpu_blocks)
-        # Mapping: seq_id -> BlockTable.
-        self.block_tables: Dict[int, BlockTable] = {}
+        # Mapping: seq_id -> BlockTableList (one for each layer)
+        self.block_tables: Dict[int, List[BlockTable]] = {}
 
     def can_allocate(self, seq_group: SequenceGroup) -> bool:
         # FIXME(woosuk): Here we assume that all sequences in the group share
@@ -89,20 +91,30 @@ class BlockSpaceManager:
         return num_free_gpu_blocks - num_required_blocks >= self.watermark_blocks
 
     def allocate(self, seq_group: SequenceGroup) -> None:
-        # NOTE: Here we assume that all sequences in the group have the same prompt.
-        seq = seq_group.get_seqs()[0]
+        # TODO (andy): quite strange that all sequences in the group have the same prompt
+        # # NOTE: Here we assume that all sequences in the group have the same prompt.
+        # seq = seq_group.get_seqs()[0]
 
-        # Allocate new physical token blocks that will store the prompt tokens.
-        block_table: BlockTable = []
-        for _ in range(len(seq.logical_token_blocks)):
-            block = self.gpu_allocator.allocate()
-            # Set the reference counts of the token blocks.
-            block.ref_count = seq_group.num_seqs()
-            block_table.append(block)
+        # # Allocate new physical token blocks that will store the prompt tokens.
+        # block_table: BlockTable = []
+        # for _ in range(len(seq.logical_token_blocks)):
+        #     block = self.gpu_allocator.allocate()
+        #     # Set the reference counts of the token blocks.
+        #     block.ref_count = seq_group.num_seqs()
+        #     block_table.append(block)
 
         # Assign the block table for each sequence.
         for seq in seq_group.get_seqs():
-            self.block_tables[seq.seq_id] = block_table.copy()
+            self.block_tables[seq.seq_id] = []
+            for _ in range(self.num_layers):
+                block_table: BlockTable = []
+                for _ in range(len(seq.logical_token_blocks)):
+                    block = self.gpu_allocator.allocate()
+                    # Set the reference counts of the token blocks.
+                    block.ref_count = 1
+                    block_table.append(block)
+                # Assuming each sequence has an attribute num_layers
+                self.block_tables[seq.seq_id].append(block_table)
 
     def can_append_slot(self, seq_group: SequenceGroup) -> bool:
         # Simple heuristic: If there is at least one free block
@@ -113,33 +125,43 @@ class BlockSpaceManager:
 
     def append_slot(self, seq: Sequence) -> Optional[Tuple[int, int]]:
         """Allocate a physical slot for a new token."""
-        logical_blocks = seq.logical_token_blocks
-        block_table = self.block_tables[seq.seq_id]
+        # logical_blocks = seq.logical_token_blocks
+        # block_table = self.block_tables[seq.seq_id]
 
-        if len(block_table) < len(logical_blocks):
-            # The sequence has a new logical block.
-            # Allocate a new physical block.
+        for layer_id in range(self.num_layers):
             block = self.gpu_allocator.allocate()
+            block_table = self.block_tables[seq.seq_id][layer_id]
             block_table.append(block)
-            return None
+        
+        return None
 
-        # We want to append the token to the last physical block.
-        last_block = block_table[-1]
-        assert last_block.device == Device.GPU
-        if last_block.ref_count == 1:
-            # Not shared with other sequences. Appendable.
-            return None
-        else:
-            # The last block is shared with other sequences.
-            # Copy on Write: Allocate a new block and copy the tokens.
-            new_block = self.gpu_allocator.allocate()
-            block_table[-1] = new_block
-            self.gpu_allocator.free(last_block)
-            return last_block.block_number, new_block.block_number
+        # TODO (andy): now block size is always 1, and we don't support shared blocks
+
+        # if len(block_table) < len(logical_blocks):
+        #     # The sequence has a new logical block.
+        #     # Allocate a new physical block.
+        #     block = self.gpu_allocator.allocate()
+        #     block_table.append(block)
+        #     return None
+
+        # # We want to append the token to the last physical block.
+        # last_block = block_table[-1]
+        # assert last_block.device == Device.GPU
+        # if last_block.ref_count == 1:
+        #     # Not shared with other sequences. Appendable.
+        #     return None
+        # else:
+        #     # The last block is shared with other sequences.
+        #     # Copy on Write: Allocate a new block and copy the tokens.
+        #     new_block = self.gpu_allocator.allocate()
+        #     block_table[-1] = new_block
+        #     self.gpu_allocator.free(last_block)
+        #     return last_block.block_number, new_block.block_number
 
     def fork(self, parent_seq: Sequence, child_seq: Sequence) -> None:
         # NOTE: fork does not allocate a new physical block.
         # Thus, it is always safe from OOM.
+        # TODO (andy): we don't support shared blocks now
         src_block_table = self.block_tables[parent_seq.seq_id]
         self.block_tables[child_seq.seq_id] = src_block_table.copy()
         for block in src_block_table:
@@ -167,6 +189,7 @@ class BlockSpaceManager:
         num_required_blocks = len(blocks) + num_swapped_seqs
         return num_free_blocks - num_required_blocks >= self.watermark_blocks
 
+    # TODO (andy): we don't support swap in & out now
     def swap_in(self, seq_group: SequenceGroup) -> Dict[int, int]:
         # CPU block -> GPU block.
         mapping: Dict[PhysicalTokenBlock, PhysicalTokenBlock] = {}
@@ -198,6 +221,7 @@ class BlockSpaceManager:
         blocks = self._get_physical_blocks(seq_group)
         return len(blocks) <= self.cpu_allocator.get_num_free_blocks()
 
+    # TODO (andy): we don't support swap in & out now
     def swap_out(self, seq_group: SequenceGroup) -> Dict[int, int]:
         # GPU block -> CPU block.
         mapping: Dict[PhysicalTokenBlock, PhysicalTokenBlock] = {}
@@ -236,18 +260,23 @@ class BlockSpaceManager:
         if seq.seq_id not in self.block_tables:
             # Already freed or haven't been scheduled yet.
             return
-        block_table = self.block_tables[seq.seq_id]
-        self._free_block_table(block_table)
+        for block_table in self.block_tables[seq.seq_id]:
+            self._free_block_table(block_table)
         del self.block_tables[seq.seq_id]
 
     def reset(self) -> None:
-        for block_table in self.block_tables.values():
-            self._free_block_table(block_table)
+        for block_table_list in self.block_tables.values():
+            for block_table in block_table_list:
+                self._free_block_table(block_table)
         self.block_tables.clear()
 
-    def get_block_table(self, seq: Sequence) -> List[int]:
-        block_table = self.block_tables[seq.seq_id]
-        return [block.block_number for block in block_table]
+    def get_block_table_list(self, seq: Sequence) -> List[int]:
+
+        block_table_list = []
+        for block_table in self.block_tables[seq.seq_id]:
+            block_table_list.append([block.block_number for block in block_table])
+
+        return block_table_list
 
     def get_num_free_gpu_blocks(self) -> int:
         return self.gpu_allocator.get_num_free_blocks()

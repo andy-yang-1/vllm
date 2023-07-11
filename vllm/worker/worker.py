@@ -48,6 +48,7 @@ class Worker:
             self.model_config.get_hidden_size(),
             self.model_config.dtype,
         )
+        self.num_layers = self.model_config.get_num_layers(self.parallel_config)
 
         # Uninitialized cache engine. Will be initialized by
         # self.init_cache_engine().
@@ -94,11 +95,10 @@ class Worker:
         input_tokens, input_positions, input_metadata = self._prepare_inputs(seqs)
 
         # Execute the model.
-        num_layers = self.model_config.get_num_layers(self.parallel_config)
         self.model(
             input_ids=input_tokens,
             positions=input_positions,
-            kv_caches=[(None, None)] * num_layers,
+            kv_cache=(None, None),
             input_metadata=input_metadata,
             cache_events=None,
         )
@@ -137,7 +137,7 @@ class Worker:
         seq_groups: List[Tuple[List[int], SamplingParams]] = []
         input_tokens: List[int] = []
         input_positions: List[int] = []
-        slot_mapping: List[int] = []
+        slot_mapping: List[List[int]] = [[] for _ in range(self.num_layers)]
 
         # Add prompt tokens.
         prompt_lens: List[int] = []
@@ -165,16 +165,18 @@ class Worker:
             if seq_group_metadata.block_tables is None:
                 # During memory profiling, the block tables are not initialized
                 # yet. In this case, we just use a dummy slot mapping.
-                slot_mapping.extend([0] * prompt_len)
+                for layer_id in range(self.num_layers):
+                    slot_mapping[layer_id].extend([0] * prompt_len)
                 continue
 
             # Compute the slot mapping.
             block_table = seq_group_metadata.block_tables[seq_id]
             for i in range(prompt_len):
-                block_number = block_table[i // self.block_size]
-                block_offset = i % self.block_size
-                slot = block_number * self.block_size + block_offset
-                slot_mapping.append(slot)
+                for layer_id in range(self.num_layers):
+                    block_number = block_table[layer_id][i // self.block_size]
+                    block_offset = i % self.block_size
+                    slot = block_number * self.block_size + block_offset
+                    slot_mapping[layer_id].append(slot)
 
         # Add generation tokens.
         max_context_len = 0
@@ -203,13 +205,14 @@ class Worker:
 
                 max_context_len = max(max_context_len, context_len)
                 max_num_blocks_per_seq = max(
-                    max_num_blocks_per_seq, len(block_table))
+                    max_num_blocks_per_seq, len(block_table[0])) # denote layer 0
                 context_lens.append(context_len)
 
-                block_number = block_table[position // self.block_size]
-                block_offset = position % self.block_size
-                slot = block_number * self.block_size + block_offset
-                slot_mapping.append(slot)
+                for layer_id in range(self.num_layers):
+                    block_number = block_table[layer_id][position // self.block_size]
+                    block_offset = position % self.block_size
+                    slot = block_number * self.block_size + block_offset
+                    slot_mapping[layer_id].append(slot)
 
         # Optimization: Pad the input length to be a multiple of 8.
         # This is required for utilizing the Tensor Cores in NVIDIA GPUs.
@@ -219,8 +222,10 @@ class Worker:
         # Convert to tensors.
         tokens_tensor = torch.cuda.LongTensor(input_tokens)
         positions_tensor = torch.cuda.LongTensor(input_positions)
-        slot_mapping_tensor = torch.cuda.IntTensor(slot_mapping)
+        # slot_mapping_tensor = torch.cuda.IntTensor(slot_mapping)
+        slot_mapping_tensor = [torch.cuda.IntTensor(slots) for slots in slot_mapping]
         context_lens_tensor = torch.cuda.IntTensor(context_lens)
+        # print("generation_table: ",generation_block_tables)
         padded_block_tables = [
             _pad_to_max(block_table, max_num_blocks_per_seq)
             for block_table in generation_block_tables]
@@ -281,7 +286,7 @@ class Worker:
         output = self.model(
             input_ids=input_tokens,
             positions=input_positions,
-            kv_caches=self.gpu_cache,
+            kv_cache=self.gpu_cache,
             input_metadata=input_metadata,
             cache_events=cache_events,
         )
@@ -310,5 +315,6 @@ def _pad_to_alignment(x: List[int], multiple_of: int) -> List[int]:
     return x + [0] * ((-len(x)) % multiple_of)
 
 
-def _pad_to_max(x: List[int], max_len: int) -> List[int]:
-    return x + [0] * (max_len - len(x))
+def _pad_to_max(x: List[List[int]], max_len: int) -> List[int]:
+    return [y + [0] * (max_len - len(y)) for y in x]
+    # return x + [0] * (max_len - len(x))

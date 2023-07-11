@@ -14,7 +14,7 @@ class InputMetadata:
         seq_groups: List[Tuple[List[int], SamplingParams]],     # List of (seq_ids, sampling_params).
         seq_data: Dict[int, SequenceData],                      # Seq_id -> SequenceData.
         prompt_lens: List[int],
-        slot_mapping: torch.Tensor,
+        slot_mapping: List[torch.Tensor],                       # layer_id -> slot_mapping.
         context_lens: torch.Tensor,
         max_context_len: int,
         block_tables: torch.Tensor,
@@ -31,7 +31,7 @@ class InputMetadata:
         self.num_prompts = len(prompt_lens)
         self.num_prompt_tokens = sum(prompt_lens)
         self.num_generation_tokens = context_lens.shape[0]
-        self.num_valid_tokens = slot_mapping.shape[0]
+        self.num_valid_tokens = slot_mapping[0].shape[0]
         if block_tables.numel() > 0:
             self.max_num_blocks_per_seq = block_tables.shape[1]
         else:

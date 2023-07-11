@@ -1,5 +1,5 @@
 """Multi-head attention."""
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, Dict
 
 import torch
 import torch.nn as nn
@@ -13,6 +13,9 @@ from vllm.model_executor.input_metadata import InputMetadata
 
 _SUPPORTED_HEAD_SIZES = [64, 80, 96, 128]
 
+
+# debug_dict: Dict[Tuple[int,int,int],Tuple[torch.Tensor,torch.Tensor]] = {}
+debug_dict: Dict[int,Tuple[torch.Tensor,torch.Tensor]] = {}
 
 def modified_masked_attention(
     query: torch.Tensor,
@@ -41,6 +44,7 @@ def modified_single_query_cached_kv_attention(
     value_cache: torch.Tensor,
     block_tables: torch.Tensor,
     context_lens: torch.Tensor,
+    layer_id: int,
 ) -> Tuple[torch.Tensor, List[int]]:
     num_heads = value_cache.shape[1]
     head_size = value_cache.shape[2]
@@ -50,15 +54,19 @@ def modified_single_query_cached_kv_attention(
     min_indexes = []
     for i in range(num_input_tokens):
         q = query[i].unsqueeze(0)
-        block_table = block_tables[i]
+        # Get the block_table for the current layer
+        block_table = block_tables[i][layer_id]
         context_len = int(context_lens[i])
 
         keys = []
         values = []
-        # indexes = []
         for j in range(context_len):
             block_number = int(block_table[j // block_size])
             block_offset = j % block_size
+
+            # slot_idx = block_number * block_size + block_offset
+            # assert slot_idx in debug_dict
+            # k, v = debug_dict[slot_idx]
 
             k = key_cache[block_number, :, :, block_offset, :]
             k = k.reshape(num_heads, head_size)
@@ -66,7 +74,14 @@ def modified_single_query_cached_kv_attention(
 
             v = value_cache[block_number, :, :, block_offset]
             values.append(v)
-            # indexes.append(block_number * block_size + block_offset)
+
+            
+            # print(f"i: {i}, layer_id: {layer_id}, token_seq: {j}, block_number: {block_number}, block_offset: {block_offset}")
+            # if not (i,layer_id,j) in debug_dict:
+            #     debug_dict[(i,layer_id,j)] = (k,v)
+            # else:
+            #     assert torch.allclose(debug_dict[(i,layer_id,j)][0], k, atol=1e-4)
+            #     assert torch.allclose(debug_dict[(i,layer_id,j)][1], v, atol=1e-4)
         keys = torch.stack(keys, dim=0)
         values = torch.stack(values, dim=0)
 
@@ -75,12 +90,10 @@ def modified_single_query_cached_kv_attention(
         out = out.view(num_heads, head_size)
         output[i].copy_(out, non_blocking=True)
 
-        # min_indexes.append(indexes[int(min_index)])
         min_indexes.append(int(min_index))
 
-
-    # min_indexes = torch.stack(min_indexes, dim=0)
     return output, min_indexes
+
 
 
 class PagedAttention(nn.Module):
@@ -111,12 +124,13 @@ class PagedAttention(nn.Module):
     5. Output a flattened 1D tensor.
     """
 
-    def __init__(self, num_heads: int, head_size: int, scale: float) -> None:
+    def __init__(self, num_heads: int, head_size: int, scale: float, layer_id: int = None) -> None:
         super().__init__()
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
         self.attn_op = xops.fmha.cutlass.FwOp()
+        self.layer_id = layer_id
 
         if self.head_size not in _SUPPORTED_HEAD_SIZES:
             raise ValueError(f"head_size ({self.head_size}) is not supported. "
@@ -173,17 +187,19 @@ class PagedAttention(nn.Module):
             value_cache,
             input_metadata.block_tables,
             input_metadata.context_lens,
+            self.layer_id
         )
 
         seq_ids = list(input_metadata.seq_data.keys())
 
-        for i in range(len(seq_ids)):
+        # TODO: seq_ids is not equaled with query size??
+        for i in range(len(indexs)):
             seq_id = seq_ids[i]
             seq_data = input_metadata.seq_data[seq_id]
             index = indexs[i]
             if seq_data.get_len() > discard_const:
-                print("discard: ", seq_id, index)
-                BlockSpaceManager.discard_queue.append((seq_id, index))
+                # print("discard: ", seq_id, self.layer_id, index)
+                BlockSpaceManager.discard_queue.append((seq_id, self.layer_id, index))
                     
 
     def forward(
@@ -229,13 +245,30 @@ class PagedAttention(nn.Module):
         if (num_valid_tokens > 0 and key_cache is not None
             and value_cache is not None):
             # The stride is 3 because the key and value are sliced from qkv.
-            cache_ops.reshape_and_cache(
-                key[:num_valid_tokens],
-                value[:num_valid_tokens],
-                key_cache,
-                value_cache,
-                input_metadata.slot_mapping,
-            )
+            # print(f"input_metadata.slot_mapping: {input_metadata.slot_mapping[self.layer_id]} -> layer_id: {self.layer_id}")
+            
+            # TODO (andy): something wrong with reshape: num_valid_tokens doesn't match
+            # input_ids padded to max but slot_mapping is not (cancel padding?)
+            
+            x = key_cache.shape[-1]
+            block_size = key_cache.shape[-2]
+
+            for i in range(num_valid_tokens):
+                reshaped_key = key[i].reshape(self.num_heads, self.head_size // x, x)
+                block_idx = torch.div(input_metadata.slot_mapping[self.layer_id][i], block_size, rounding_mode='floor')
+                block_offset = input_metadata.slot_mapping[self.layer_id][i] % block_size
+                key_cache[block_idx, :, :, block_offset, :] = reshaped_key
+                value_cache[block_idx, :, :, block_offset] = value[i]
+
+            # cache_ops.reshape_and_cache(
+            #     key[:num_valid_tokens],
+            #     value[:num_valid_tokens],
+            #     key_cache,
+            #     value_cache,
+            #     input_metadata.slot_mapping[self.layer_id],
+            # )
+            # for i in range(num_valid_tokens):
+            #     debug_dict[int(input_metadata.slot_mapping[self.layer_id][i])] = (key[i], value[i])
 
         if input_metadata.num_generation_tokens > 0:
             assert key_cache is not None and value_cache is not None, (
