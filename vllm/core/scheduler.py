@@ -130,6 +130,7 @@ class Scheduler:
         while self.running:
             seq_group = self.running.pop(0)
             while not self.block_manager.can_append_slot(seq_group):
+                print("no slot available")
                 if self.running:
                     # Preempt the lowest-priority sequence groups.
                     victim_seq_group = self.running.pop(-1)
@@ -141,10 +142,14 @@ class Scheduler:
                     self._preempt(seq_group, blocks_to_swap_out)
                     preempted.append(seq_group)
                     break
+                # self.free_discarded_block()
             else:
                 # Append new slots to the sequence group.
                 self._append_slot(seq_group, blocks_to_copy)
                 running.append(seq_group)
+                # clear discard_queue
+                BlockSpaceManager.discard_queue.clear()
+
         self.running = running
 
         # Swap in the sequence groups in the SWAPPED state if possible.
@@ -438,28 +443,28 @@ class Scheduler:
 
     def free_discarded_block(self):
         # Iterate over the discard_queue.
-        for seq_id, block_idx in BlockSpaceManager.discard_queue:
+        for seq_id, layer_id, block_idx in BlockSpaceManager.discard_queue:
             # Get the corresponding sequence from the seq_data.
-            seq = None
-            flag = False
-            for seq_group in self.running:
-                for s in seq_group.get_seqs(SequenceStatus.RUNNING):
-                    if s.seq_id == seq_id:
-                        seq = s
-                        flag = True
-                        break
-                if flag:
-                    break
-            assert seq is not None, f"Sequence with id {seq_id} not found."
+            # seq = None
+            # flag = False
+            # for seq_group in self.running:
+            #     for s in seq_group.get_seqs(SequenceStatus.RUNNING):
+            #         if s.seq_id == seq_id:
+            #             seq = s
+            #             flag = True
+            #             break
+            #     if flag:
+            #         break
+            # assert seq is not None, f"Sequence with id {seq_id} not found."
 
-            # Get the logical block to be discarded.
-            discard_block = seq.logical_token_blocks[block_idx]
+            # # Get the logical block to be discarded.
+            # discard_block = seq.logical_token_blocks[block_idx]
 
-            # Remove the block from the sequence's logical blocks.
-            seq.logical_token_blocks.remove(discard_block)
+            # # Remove the block from the sequence's logical blocks.
+            # seq.logical_token_blocks.remove(discard_block)
 
             # Free the corresponding physical block.
-            freed_block = self.block_manager.block_tables[seq_id][block_idx]
+            freed_block = self.block_manager.block_tables[seq_id][layer_id][block_idx]
             self.block_manager.block_tables[seq_id].remove(freed_block)
             self.block_manager.gpu_allocator.free(freed_block)
 

@@ -118,10 +118,10 @@ class BlockSpaceManager:
 
     def can_append_slot(self, seq_group: SequenceGroup) -> bool:
         # Simple heuristic: If there is at least one free block
-        # for each sequence, we can append.
+        # for each sequence's layer, we can append.
         num_free_gpu_blocks = self.gpu_allocator.get_num_free_blocks()
         num_seqs = seq_group.num_seqs(status=SequenceStatus.RUNNING)
-        return num_seqs <= num_free_gpu_blocks
+        return num_seqs * self.num_layers <= num_free_gpu_blocks
 
     def append_slot(self, seq: Sequence) -> Optional[Tuple[int, int]]:
         """Allocate a physical slot for a new token."""
