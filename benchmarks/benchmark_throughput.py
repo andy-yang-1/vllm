@@ -188,7 +188,7 @@ if __name__ == "__main__":
                         default="vllm")
     parser.add_argument("--dataset", type=str, default="/home/ec2-user/speed/ShareGPT_V3_unfiltered_cleaned_split.json",
                         help="Path to the dataset.")
-    parser.add_argument("--model", type=str, default="facebook/opt-125m")
+    parser.add_argument("--model", type=str, default="facebook/opt-6.7b")
     parser.add_argument("--tokenizer", type=str, default=None)
     parser.add_argument("--tensor-parallel-size", "-tp", type=int, default=1)
     parser.add_argument("--n", type=int, default=1,

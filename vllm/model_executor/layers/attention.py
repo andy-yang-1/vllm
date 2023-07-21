@@ -31,10 +31,11 @@ def modified_masked_attention(
     attn = torch.softmax(attn, dim=-1)
     out = torch.einsum('hqk,khd->qhd', attn, value)
 
-    # Find the minimum value in attn and its index
+    # Sort the values in attn and return their indices
     attn_scores_summed = torch.sum(attn, dim=0)
-    min_value, min_index = torch.min(attn_scores_summed, dim=-1)
-    return out, min_index
+    sorted_values, sorted_indices = torch.sort(attn_scores_summed, dim=-1)
+    sorted_indices = sorted_indices.squeeze(0)
+    return out, sorted_indices
 
 
 def modified_single_query_cached_kv_attention(
@@ -51,7 +52,7 @@ def modified_single_query_cached_kv_attention(
     block_size = value_cache.shape[3]
 
     num_input_tokens = query.shape[0]
-    min_indexes = []
+    sorted_indexs = []
     for i in range(num_input_tokens):
         q = query[i].unsqueeze(0)
         # Get the block_table for the current layer
@@ -60,9 +61,15 @@ def modified_single_query_cached_kv_attention(
 
         keys = []
         values = []
-        for j in range(context_len):
-            block_number = int(block_table[j // block_size])
-            block_offset = j % block_size
+        for block_number in block_table:
+            # block_number = int(block_table[j // block_size])
+
+            # block_number == 0 -> padded block
+            if block_number == 0:
+                break
+
+            #TODO (andy) change offset after enabling block_size > 1
+            block_offset = 0
 
             # slot_idx = block_number * block_size + block_offset
             # assert slot_idx in debug_dict
@@ -86,13 +93,13 @@ def modified_single_query_cached_kv_attention(
         values = torch.stack(values, dim=0)
 
         scale = 1.0 / (head_size ** 0.5)
-        out, min_index = modified_masked_attention(q, keys, values, scale)
+        out, sorted_indices = modified_masked_attention(q, keys, values, scale)
         out = out.view(num_heads, head_size)
         output[i].copy_(out, non_blocking=True)
 
-        min_indexes.append(int(min_index))
+        sorted_indexs.append(sorted_indices)
 
-    return output, min_indexes
+    return output, sorted_indexs
 
 
 
@@ -180,7 +187,7 @@ class PagedAttention(nn.Module):
         # )
 
         discard_const = 20
-        _, indexs = modified_single_query_cached_kv_attention(
+        _, sorted_indices = modified_single_query_cached_kv_attention(
             output,
             query,
             key_cache,
@@ -190,16 +197,19 @@ class PagedAttention(nn.Module):
             self.layer_id
         )
 
-        seq_ids = list(input_metadata.seq_data.keys())
+        heavy_ratio = 0.5
 
         # TODO: seq_ids is not equaled with query size??
-        for i in range(len(indexs)):
-            seq_id = seq_ids[i]
-            seq_data = input_metadata.seq_data[seq_id]
-            index = indexs[i]
-            if seq_data.get_len() > discard_const:
-                # print("discard: ", seq_id, self.layer_id, index)
-                BlockSpaceManager.discard_queue.append((seq_id, self.layer_id, index))
+        for i in range(input_metadata.num_generation_tokens):
+            seq_id = input_metadata.seq_groups[i+input_metadata.num_prompts][0][0]
+            indices = sorted_indices[i].tolist()
+            #TODO (andy): recent
+            discard_const = int(heavy_ratio * len(input_metadata.seq_data[seq_id].prompt_token_ids)) + 1
+            if len(indices) > discard_const:
+                indices = indices[:len(indices)-discard_const]
+                indices.sort(reverse=True)  # Sort indices from high to low
+                for index in indices:
+                    BlockSpaceManager.discard_queue.append((seq_id, self.layer_id, index))
                     
 
     def forward(
@@ -257,6 +267,9 @@ class PagedAttention(nn.Module):
                 reshaped_key = key[i].reshape(self.num_heads, self.head_size // x, x)
                 block_idx = torch.div(input_metadata.slot_mapping[self.layer_id][i], block_size, rounding_mode='floor')
                 block_offset = input_metadata.slot_mapping[self.layer_id][i] % block_size
+                # block_idx = input_metadata.slot_mapping[self.layer_id][i]
+                # block_offset = 0
+                assert block_idx < key_cache.shape[0], "block_idx out of range"
                 key_cache[block_idx, :, :, block_offset, :] = reshaped_key
                 value_cache[block_idx, :, :, block_offset] = value[i]
 

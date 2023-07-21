@@ -113,6 +113,8 @@ class Scheduler:
         blocks_to_swap_out: Dict[int, int] = {}
         blocks_to_copy: Dict[int, List[int]] = {}
 
+        discarded_flag = False
+
         # Fix the current time.
         now = time.time()
 
@@ -127,28 +129,34 @@ class Scheduler:
         # Reserve new token slots for the running sequence groups.
         running: List[SequenceGroup] = []
         preempted: List[SequenceGroup] = []
+        # self.free_discarded_block()
         while self.running:
             seq_group = self.running.pop(0)
             while not self.block_manager.can_append_slot(seq_group):
                 print("no slot available")
-                if self.running:
-                    # Preempt the lowest-priority sequence groups.
-                    victim_seq_group = self.running.pop(-1)
-                    self._preempt(victim_seq_group, blocks_to_swap_out)
-                    preempted.append(victim_seq_group)
-                else:
-                    # No other sequence groups can be preempted.
-                    # Preempt the current sequence group.
-                    self._preempt(seq_group, blocks_to_swap_out)
-                    preempted.append(seq_group)
-                    break
-                # self.free_discarded_block()
+                # if self.running:
+                #     # Preempt the lowest-priority sequence groups.
+                #     victim_seq_group = self.running.pop(-1)
+                #     self._preempt(victim_seq_group, blocks_to_swap_out)
+                #     preempted.append(victim_seq_group)
+                # else:
+                #     # No other sequence groups can be preempted.
+                #     # Preempt the current sequence group.
+                #     self._preempt(seq_group, blocks_to_swap_out)
+                #     preempted.append(seq_group)
+                #     break
+                self.free_discarded_block()
+                if not self.block_manager.can_append_slot(seq_group):
+                    raise ValueError("no slot available")
+                self._append_slot(seq_group, blocks_to_copy)
+                running.append(seq_group)
+                discarded_flag = True
+
             else:
                 # Append new slots to the sequence group.
                 self._append_slot(seq_group, blocks_to_copy)
                 running.append(seq_group)
-                # clear discard_queue
-                BlockSpaceManager.discard_queue.clear()
+
 
         self.running = running
 
@@ -188,7 +196,7 @@ class Scheduler:
         # prioritized over the sequence groups in the WAITING state.
         # This is because we want to bound the amount of CPU memory taken by
         # the swapped sequence groups.
-        if not self.swapped:
+        if not self.swapped and not discarded_flag:
             # Optimization: We do not sort the waiting queue since the preempted
             # sequence groups are added to the front and the new sequence groups
             # are added to the back.
@@ -196,9 +204,16 @@ class Scheduler:
                 seq_group = self.waiting[0]
                 # If the sequence group has been preempted in this step, stop.
                 if seq_group in preempted:
+                    print(f"{seq_group.request_id}: seq_group in preempted")
                     break
                 # If the sequence group cannot be allocated, stop.
                 if not self.block_manager.can_allocate(seq_group):
+                    print(f"request {seq_group.request_id}: cannot allocate")
+                    print(f"num_free_gpu_blocks: {self.block_manager.get_num_free_gpu_blocks()}")
+                    seq = seq_group.get_seqs()[0]
+                    num_required_blocks = len(seq.logical_token_blocks) * self.model_config.get_num_layers(self.parallel_config)
+                    print(f"num_required_blocks: {num_required_blocks}")
+                    self.free_discarded_block()
                     break
 
                 # If the number of batched tokens exceeds the limit, stop.
@@ -221,6 +236,8 @@ class Scheduler:
                 self.running.append(seq_group)
                 num_batched_tokens += num_prompt_tokens
                 prompt_group_ids.append(seq_group.request_id)
+
+        BlockSpaceManager.discard_queue.clear()
 
         scheduler_outputs = SchedulerOutputs(
             blocks_to_swap_in=blocks_to_swap_in,
@@ -304,6 +321,7 @@ class Scheduler:
     ) -> List[SequenceGroup]:
         
         # print("discarded_slot_index: ", BlockSpaceManager.discard_queue)
+        self.free_discarded_block()
 
         # Update the running sequences and free blocks.
         for seq_group in self.running:
@@ -443,6 +461,7 @@ class Scheduler:
 
     def free_discarded_block(self):
         # Iterate over the discard_queue.
+        # print(f"free block num: {len(BlockSpaceManager.discard_queue)}")
         for seq_id, layer_id, block_idx in BlockSpaceManager.discard_queue:
             # Get the corresponding sequence from the seq_data.
             # seq = None
@@ -464,8 +483,10 @@ class Scheduler:
             # seq.logical_token_blocks.remove(discard_block)
 
             # Free the corresponding physical block.
+            if seq_id not in self.block_manager.block_tables:
+                continue
             freed_block = self.block_manager.block_tables[seq_id][layer_id][block_idx]
-            self.block_manager.block_tables[seq_id].remove(freed_block)
+            self.block_manager.block_tables[seq_id][layer_id].remove(freed_block)
             self.block_manager.gpu_allocator.free(freed_block)
 
 

@@ -197,11 +197,14 @@ class Worker:
                 input_tokens.append(generation_token)
 
                 context_len = seq_data.get_len()
-                position = context_len - 1
-                input_positions.append(position)
 
                 block_table = seq_group_metadata.block_tables[seq_id]
                 generation_block_tables.append(block_table)
+
+                # position = context_len - 1
+                # TODO: modify position later when block size > 1
+                position = len(block_table[0]) - 1
+                input_positions.append(position)
 
                 max_context_len = max(max_context_len, context_len)
                 max_num_blocks_per_seq = max(
@@ -209,8 +212,8 @@ class Worker:
                 context_lens.append(context_len)
 
                 for layer_id in range(self.num_layers):
-                    block_number = block_table[layer_id][position // self.block_size]
-                    block_offset = position % self.block_size
+                    block_number = block_table[layer_id][-1]
+                    block_offset = position % self.block_size # modify offset later
                     slot = block_number * self.block_size + block_offset
                     slot_mapping[layer_id].append(slot)
 
