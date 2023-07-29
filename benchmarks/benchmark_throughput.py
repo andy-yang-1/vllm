@@ -11,6 +11,9 @@ from tqdm import tqdm
 
 from vllm import LLM, SamplingParams
 from vllm.transformers_utils.tokenizer import get_tokenizer
+import cProfile
+import torch
+from torch.utils.tensorboard import SummaryWriter
 
 
 def sample_requests(
@@ -210,4 +213,19 @@ if __name__ == "__main__":
     if args.tokenizer is None:
         args.tokenizer = args.model
 
-    main(args)
+    profiler = cProfile.Profile()
+    profiler.runcall(main, args)
+    # profiler.dump_stats("vllm_prune.prof")
+    # profiler.dump_stats("vllm.prof")
+    # profiler.dump_stats("h2o.prof")
+    # profiler.dump_stats("tmp.prof")
+    profiler.dump_stats("h2o_sort.prof")
+
+    # writer = SummaryWriter()
+    # with torch.profiler.profile() as prof:
+    #     main(args)
+    
+    # prof.export_chrome_trace("trace.json")
+    # writer.add_text("Performance Analysis", prof.key_averages().table(sort_by="cpu_time_total"))
+    # writer.close()
+

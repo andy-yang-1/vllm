@@ -88,6 +88,14 @@ attention_extension = CUDAExtension(
 )
 ext_modules.append(attention_extension)
 
+# Modified Attention kernels.
+modified_attention_extension = CUDAExtension(
+    name="vllm.modified_attention_ops",
+    sources=["csrc/modified_attention.cpp", "csrc/attention/modified_attention_kernels.cu"],
+    extra_compile_args={"cxx": CXX_FLAGS, "nvcc": NVCC_FLAGS},
+)
+ext_modules.append(modified_attention_extension)
+
 # Positional encoding kernels.
 positional_encoding_extension = CUDAExtension(
     name="vllm.pos_encoding_ops",

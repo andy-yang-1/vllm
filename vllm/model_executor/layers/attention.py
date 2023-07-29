@@ -6,6 +6,7 @@ import torch.nn as nn
 from xformers import ops as xops
 
 from vllm import attention_ops
+from vllm import modified_attention_ops
 from vllm import cache_ops
 from vllm import pos_encoding_ops
 from vllm.core.block_manager import BlockSpaceManager
@@ -61,19 +62,12 @@ def modified_single_query_cached_kv_attention(
 
         keys = []
         values = []
-        for block_number in block_table:
-            # block_number = int(block_table[j // block_size])
+        for j in range(context_len):
 
-            # block_number == 0 -> padded block
-            if block_number == 0:
-                break
+            block_number = block_table[j]
 
             #TODO (andy) change offset after enabling block_size > 1
             block_offset = 0
-
-            # slot_idx = block_number * block_size + block_offset
-            # assert slot_idx in debug_dict
-            # k, v = debug_dict[slot_idx]
 
             k = key_cache[block_number, :, :, block_offset, :]
             k = k.reshape(num_heads, head_size)
@@ -82,13 +76,6 @@ def modified_single_query_cached_kv_attention(
             v = value_cache[block_number, :, :, block_offset]
             values.append(v)
 
-            
-            # print(f"i: {i}, layer_id: {layer_id}, token_seq: {j}, block_number: {block_number}, block_offset: {block_offset}")
-            # if not (i,layer_id,j) in debug_dict:
-            #     debug_dict[(i,layer_id,j)] = (k,v)
-            # else:
-            #     assert torch.allclose(debug_dict[(i,layer_id,j)][0], k, atol=1e-4)
-            #     assert torch.allclose(debug_dict[(i,layer_id,j)][1], v, atol=1e-4)
         keys = torch.stack(keys, dim=0)
         values = torch.stack(values, dim=0)
 
@@ -186,30 +173,80 @@ class PagedAttention(nn.Module):
         #     input_metadata.max_context_len,
         # )
 
-        discard_const = 20
-        _, sorted_indices = modified_single_query_cached_kv_attention(
+        # _, sorted_indices = modified_single_query_cached_kv_attention(
+        #     output,
+        #     query,
+        #     key_cache,
+        #     value_cache,
+        #     input_metadata.block_tables,
+        #     input_metadata.context_lens,
+        #     self.layer_id
+        # )
+
+        num_tokens = query.shape[0]
+        num_heads = query.shape[1]
+        block_size = value_cache.shape[3]
+
+        max_context_len = input_metadata.max_context_len
+        attn = torch.zeros(num_tokens, num_heads, max_context_len, dtype=torch.float, device='cuda')
+
+        modified_attention_ops.modified_single_query_cached_kv_attention(
             output,
+            attn,
             query,
             key_cache,
             value_cache,
+            self.scale,
             input_metadata.block_tables,
             input_metadata.context_lens,
+            block_size,
+            max_context_len,
             self.layer_id
         )
 
-        heavy_ratio = 0.5
+        # def discard():
+        #     attn_score = torch.sum(attn, dim=1)
+        #     for i in range(input_metadata.num_generation_tokens):
+        #         seq_id = input_metadata.seq_groups[i+input_metadata.num_prompts][0][0]
+        #         min_index = torch.argmin(attn_score[i][:input_metadata.context_lens[i]])
+        #         BlockSpaceManager.discard_queue.append((seq_id, self.layer_id, min_index))
 
-        # TODO: seq_ids is not equaled with query size??
-        for i in range(input_metadata.num_generation_tokens):
-            seq_id = input_metadata.seq_groups[i+input_metadata.num_prompts][0][0]
-            indices = sorted_indices[i].tolist()
-            #TODO (andy): recent
-            discard_const = int(heavy_ratio * len(input_metadata.seq_data[seq_id].prompt_token_ids)) + 1
-            if len(indices) > discard_const:
-                indices = indices[:len(indices)-discard_const]
-                indices.sort(reverse=True)  # Sort indices from high to low
-                for index in indices:
-                    BlockSpaceManager.discard_queue.append((seq_id, self.layer_id, index))
+        def discard():
+            heavy_const = 10
+            attn_score = torch.sum(attn, dim=1)
+            sorted_indices = torch.argsort(attn_score, dim=1)
+            sorted_indices = sorted_indices[:, -heavy_const:].tolist() # denote cache size > heavy_const (keep size)
+            seq_ids = [input_metadata.seq_groups[i+input_metadata.num_prompts][0][0] for i in range(input_metadata.num_generation_tokens)]
+            BlockSpaceManager.discard_queue.append((seq_ids, self.layer_id, sorted_indices))
+
+            # for i in range(input_metadata.num_generation_tokens):
+            #     seq_id = input_metadata.seq_groups[i+input_metadata.num_prompts][0][0]
+            #     indices = sorted_indices[i]
+            #     # indices = torch.sort(indices,descending=True)[0]
+            #     for index in indices:
+            #         BlockSpaceManager.discard_queue.append((seq_id, self.layer_id, index))
+        
+        discard()
+
+        # sorted_indices = None
+        # torch.cuda.empty_cache()
+        # heavy_ratio = 0.2
+        # recent_ratio = 0.1
+        # #TODO this part heavily affects performance
+        # for i in range(input_metadata.num_generation_tokens):
+        #     seq_id = input_metadata.seq_groups[i+input_metadata.num_prompts][0][0]
+        #     indices = sorted_indices[i].tolist()
+        #     # if len(indices) != input_metadata.context_lens[seq_id]:
+        #     #     print("debug")
+        #     prompt_len = len(input_metadata.seq_data[seq_id].prompt_token_ids)
+        #     heavy_const = int(heavy_ratio * prompt_len)
+        #     recent_const = prompt_len - int(recent_ratio * prompt_len)
+        #     indices = [ind for ind in indices if ind < recent_const and ind < input_metadata.context_lens[i]]
+        #     if len(indices) > heavy_const:
+        #         indices = indices[:len(indices)-heavy_const]
+        #         indices.sort(reverse=True)  # Sort indices from high to low
+        #         for index in indices:
+        #             BlockSpaceManager.discard_queue.append((seq_id, self.layer_id, index))
                     
 
     def forward(
@@ -263,23 +300,23 @@ class PagedAttention(nn.Module):
             x = key_cache.shape[-1]
             block_size = key_cache.shape[-2]
 
-            for i in range(num_valid_tokens):
-                reshaped_key = key[i].reshape(self.num_heads, self.head_size // x, x)
-                block_idx = torch.div(input_metadata.slot_mapping[self.layer_id][i], block_size, rounding_mode='floor')
-                block_offset = input_metadata.slot_mapping[self.layer_id][i] % block_size
-                # block_idx = input_metadata.slot_mapping[self.layer_id][i]
-                # block_offset = 0
-                assert block_idx < key_cache.shape[0], "block_idx out of range"
-                key_cache[block_idx, :, :, block_offset, :] = reshaped_key
-                value_cache[block_idx, :, :, block_offset] = value[i]
+            # for i in range(num_valid_tokens):
+            #     reshaped_key = key[i].reshape(self.num_heads, self.head_size // x, x)
+            #     block_idx = torch.div(input_metadata.slot_mapping[self.layer_id][i], block_size, rounding_mode='floor')
+            #     block_offset = input_metadata.slot_mapping[self.layer_id][i] % block_size
+            #     # block_idx = input_metadata.slot_mapping[self.layer_id][i]
+            #     # block_offset = 0
+            #     assert block_idx < key_cache.shape[0], "block_idx out of range"
+            #     key_cache[block_idx, :, :, block_offset, :] = reshaped_key
+            #     value_cache[block_idx, :, :, block_offset] = value[i]
 
-            # cache_ops.reshape_and_cache(
-            #     key[:num_valid_tokens],
-            #     value[:num_valid_tokens],
-            #     key_cache,
-            #     value_cache,
-            #     input_metadata.slot_mapping[self.layer_id],
-            # )
+            cache_ops.reshape_and_cache(
+                key[:num_valid_tokens],
+                value[:num_valid_tokens],
+                key_cache,
+                value_cache,
+                input_metadata.slot_mapping[self.layer_id],
+            )
             # for i in range(num_valid_tokens):
             #     debug_dict[int(input_metadata.slot_mapping[self.layer_id][i])] = (key[i], value[i])
 

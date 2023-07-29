@@ -133,7 +133,7 @@ class Scheduler:
         while self.running:
             seq_group = self.running.pop(0)
             while not self.block_manager.can_append_slot(seq_group):
-                print("no slot available")
+                # print("no slot available")
                 # if self.running:
                 #     # Preempt the lowest-priority sequence groups.
                 #     victim_seq_group = self.running.pop(-1)
@@ -208,11 +208,11 @@ class Scheduler:
                     break
                 # If the sequence group cannot be allocated, stop.
                 if not self.block_manager.can_allocate(seq_group):
-                    print(f"request {seq_group.request_id}: cannot allocate")
-                    print(f"num_free_gpu_blocks: {self.block_manager.get_num_free_gpu_blocks()}")
+                    # print(f"request {seq_group.request_id}: cannot allocate")
+                    # print(f"num_free_gpu_blocks: {self.block_manager.get_num_free_gpu_blocks()}")
                     seq = seq_group.get_seqs()[0]
                     num_required_blocks = len(seq.logical_token_blocks) * self.model_config.get_num_layers(self.parallel_config)
-                    print(f"num_required_blocks: {num_required_blocks}")
+                    # print(f"num_required_blocks: {num_required_blocks}")
                     self.free_discarded_block()
                     break
 
@@ -462,34 +462,38 @@ class Scheduler:
     def free_discarded_block(self):
         # Iterate over the discard_queue.
         # print(f"free block num: {len(BlockSpaceManager.discard_queue)}")
-        for seq_id, layer_id, block_idx in BlockSpaceManager.discard_queue:
-            # Get the corresponding sequence from the seq_data.
-            # seq = None
-            # flag = False
-            # for seq_group in self.running:
-            #     for s in seq_group.get_seqs(SequenceStatus.RUNNING):
-            #         if s.seq_id == seq_id:
-            #             seq = s
-            #             flag = True
-            #             break
-            #     if flag:
-            #         break
-            # assert seq is not None, f"Sequence with id {seq_id} not found."
+        # print("free block: ", BlockSpaceManager.discard_queue)
 
-            # # Get the logical block to be discarded.
-            # discard_block = seq.logical_token_blocks[block_idx]
+        # for seq_id, layer_id, block_idx in BlockSpaceManager.discard_queue:
 
-            # # Remove the block from the sequence's logical blocks.
-            # seq.logical_token_blocks.remove(discard_block)
+        #     # Free the corresponding physical block.
+        #     if seq_id not in self.block_manager.block_tables:
+        #         continue
+        #     freed_block = self.block_manager.block_tables[seq_id][layer_id][block_idx]
+        #     self.block_manager.block_tables[seq_id][layer_id].remove(freed_block)
+        #     self.block_manager.gpu_allocator.free(freed_block)
 
-            # Free the corresponding physical block.
-            if seq_id not in self.block_manager.block_tables:
-                continue
-            freed_block = self.block_manager.block_tables[seq_id][layer_id][block_idx]
-            self.block_manager.block_tables[seq_id][layer_id].remove(freed_block)
-            self.block_manager.gpu_allocator.free(freed_block)
+        # for seq_ids, layer_id, block_idxs in BlockSpaceManager.discard_queue:
+        #     for seq_id, block_idx in zip(seq_ids, block_idxs):
+        #         # Free the corresponding physical block.
+        #         if seq_id not in self.block_manager.block_tables:
+        #             continue
+        #         freed_block = self.block_manager.block_tables[seq_id][layer_id][block_idx]
+        #         self.block_manager.block_tables[seq_id][layer_id].remove(freed_block)
+        #         self.block_manager.gpu_allocator.free(freed_block)
+            
+        for seq_ids, layer_id, block_idxs in BlockSpaceManager.discard_queue:
 
+            for i in range(len(seq_ids)):
+                seq_id = seq_ids[i]
+                block_table = self.block_manager.block_tables[seq_id][layer_id]
+                for block_idx in range(len(block_table)-1,-1,-1):
+                    if not block_idx in block_idxs[i]:
+                        freed_block = block_table[block_idx]
+                        self.block_manager.block_tables[seq_id][layer_id].remove(freed_block)
+                        self.block_manager.gpu_allocator.free(freed_block)
 
+        
         # Clear the discard_queue.
         BlockSpaceManager.discard_queue.clear()
 

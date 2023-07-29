@@ -2,6 +2,7 @@
 from typing import Dict, List, Tuple
 
 import torch
+import torch.nn.functional as F
 
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig)
@@ -195,15 +196,16 @@ class Worker:
                 seq_data = seq_group_metadata.seq_data[seq_id]
                 generation_token = seq_data.get_last_token_id()
                 input_tokens.append(generation_token)
-
-                context_len = seq_data.get_len()
-
                 block_table = seq_group_metadata.block_tables[seq_id]
+
+                # TODO: modify position later when block size > 1
+                # context_len = seq_data.get_len()
+                context_len = len(block_table[0])
+
                 generation_block_tables.append(block_table)
 
                 # position = context_len - 1
-                # TODO: modify position later when block size > 1
-                position = len(block_table[0]) - 1
+                position = context_len - 1
                 input_positions.append(position)
 
                 max_context_len = max(max_context_len, context_len)
@@ -229,10 +231,24 @@ class Worker:
         slot_mapping_tensor = [torch.cuda.IntTensor(slots) for slots in slot_mapping]
         context_lens_tensor = torch.cuda.IntTensor(context_lens)
         # print("generation_table: ",generation_block_tables)
-        padded_block_tables = [
-            _pad_to_max(block_table, max_num_blocks_per_seq)
-            for block_table in generation_block_tables]
-        block_tables_tensor = torch.cuda.IntTensor(padded_block_tables)
+        # padded_block_tables = [
+        #     _pad_to_max(block_table, max_num_blocks_per_seq)
+        #     for block_table in generation_block_tables]
+        # block_tables_tensor = torch.cuda.IntTensor(padded_block_tables)
+
+        num_tensors = len(generation_block_tables)
+        
+        block_tables_tensor = torch.zeros((num_tensors, self.num_layers, max_context_len), dtype=torch.int, device='cuda')
+
+        for i, block_table in enumerate(generation_block_tables):
+            block_tables_tensor[i, :, :len(block_table[0])] = torch.cuda.IntTensor(block_table)
+
+        # padded_block_tables = [F.pad(torch.cuda.IntTensor(block_table), (0, max_context_len - len(block_table[0])), 'constant', 0) for block_table in generation_block_tables]
+        # if len(padded_block_tables) == 0:
+        #     block_tables_tensor = torch.cuda.IntTensor([])
+        # else:
+        #     block_tables_tensor = torch.stack(padded_block_tables)
+            # print("block_tables_tensor: ", block_tables_tensor)
 
         seq_data: Dict[int, SequenceData] = {}
         for seq_group_metadata in seq_group_metadata_list:

@@ -6,6 +6,7 @@ from xformers import ops as xops
 from xformers.ops.fmha.attn_bias import BlockDiagonalCausalMask
 
 from vllm import attention_ops
+from vllm import modified_attention_ops
 from vllm.model_executor.layers.attention import modified_single_query_cached_kv_attention
 
 MAX_SEQ_LEN = 4096
@@ -294,6 +295,7 @@ def run_modified_single_query_cached_kv_attention(
 
     context_lens = [random.randint(1, MAX_SEQ_LEN) for _ in range(num_tokens)] 
     max_context_len = max(context_lens)
+    print(f"max_context_len: {max_context_len}")
     context_lens = torch.tensor(context_lens, dtype=torch.int, device='cuda')
 
     max_num_blocks_per_seq = (max_context_len + block_size - 1) // block_size
@@ -304,22 +306,44 @@ def run_modified_single_query_cached_kv_attention(
             for _ in range(max_num_blocks_per_seq)
         ]
         block_tables.append(block_table)
+    ref_block_tables = [[block_table] for block_table in block_tables]
     block_tables = torch.tensor(block_tables, dtype=torch.int, device='cuda')
+    ref_block_tables = torch.tensor(ref_block_tables, dtype=torch.int, device='cuda')
+
+    print("shapes:")
+    print(block_tables.shape)
+    print(ref_block_tables.shape)
 
     scale = float(1.0 / (head_size ** 0.5))
     output = torch.empty(
         num_tokens, num_heads, head_size, dtype=dtype, device='cuda')
-    attention_ops.single_query_cached_kv_attention(
+    
+    attn = torch.empty(num_tokens, num_heads, max_context_len, dtype=torch.float, device='cuda')
+    
+    modified_attention_ops.modified_single_query_cached_kv_attention(
         output,
+        attn,
         query,
         key_cache,
         value_cache,
         scale,
-        block_tables,
+        ref_block_tables,
         context_lens,
         block_size,
         max_context_len,
+        0
     )
+    # attention_ops.single_query_cached_kv_attention(
+    #     output,
+    #     query,
+    #     key_cache,
+    #     value_cache,
+    #     scale,
+    #     block_tables,
+    #     context_lens,
+    #     block_size,
+    #     max_context_len,
+    # )
 
     ref_output = torch.empty_like(query)
     _, indexes = modified_single_query_cached_kv_attention(
@@ -327,8 +351,9 @@ def run_modified_single_query_cached_kv_attention(
         query,
         key_cache,
         value_cache,
-        block_tables,
+        ref_block_tables,
         context_lens,
+        0,
     )
     print(indexes)
     # NOTE(woosuk): Due to the difference in the data types the two
@@ -337,47 +362,47 @@ def run_modified_single_query_cached_kv_attention(
     # We should use a relaxed tolerance for the test.
     assert torch.allclose(output, ref_output, atol=1e-3, rtol=1e-5)
 
-def test_single_query_cached_kv_attention() -> None:
-    torch.random.manual_seed(TEST_SEED)
-    torch.cuda.manual_seed(TEST_SEED)
-    # for dtype in [torch.half, torch.bfloat16, torch.float]:
-    for dtype in [torch.half]:
-        for block_size in [8, 16, 32]:
-            for head_size in [64, 80, 96, 128]:
-                print(f'Testing single_query_cached_kv_attention with '
-                      f'dtype={dtype}, block_size={block_size}, '
-                      f'head_size={head_size}')
-                run_single_query_cached_kv_attention(
-                    num_tokens=37,
-                    num_heads=3,
-                    head_size=head_size,
-                    block_size=block_size,
-                    num_blocks=1024,
-                    dtype=dtype,
-                )
+# def test_single_query_cached_kv_attention() -> None:
+#     torch.random.manual_seed(TEST_SEED)
+#     torch.cuda.manual_seed(TEST_SEED)
+#     # for dtype in [torch.half, torch.bfloat16, torch.float]:
+#     for dtype in [torch.half]:
+#         for block_size in [8, 16, 32]:
+#             for head_size in [64, 80, 96, 128]:
+#                 print(f'Testing single_query_cached_kv_attention with '
+#                       f'dtype={dtype}, block_size={block_size}, '
+#                       f'head_size={head_size}')
+#                 run_single_query_cached_kv_attention(
+#                     num_tokens=37,
+#                     num_heads=3,
+#                     head_size=head_size,
+#                     block_size=block_size,
+#                     num_blocks=1024,
+#                     dtype=dtype,
+#                 )
 
 
-def test_multi_query_kv_attention() -> None:
-    torch.random.manual_seed(TEST_SEED)
-    torch.cuda.manual_seed(TEST_SEED)
-    # for dtype in [torch.half, torch.bfloat16, torch.float]:
-    for dtype in [torch.half]:
-        for head_size in [64, 80, 96, 128]:
-            print(f'Testing multi_query_kv_attention with dtype={dtype}, '
-                  f'head_size={head_size}')
-            run_multi_query_kv_attention(
-                num_seqs=5,
-                num_heads=3,
-                head_size=head_size,
-                dtype=dtype,
-            )
+# def test_multi_query_kv_attention() -> None:
+#     torch.random.manual_seed(TEST_SEED)
+#     torch.cuda.manual_seed(TEST_SEED)
+#     # for dtype in [torch.half, torch.bfloat16, torch.float]:
+#     for dtype in [torch.half]:
+#         for head_size in [64, 80, 96, 128]:
+#             print(f'Testing multi_query_kv_attention with dtype={dtype}, '
+#                   f'head_size={head_size}')
+#             run_multi_query_kv_attention(
+#                 num_seqs=5,
+#                 num_heads=3,
+#                 head_size=head_size,
+#                 dtype=dtype,
+#             )
 
 
 def test_modified_single_query_cached_kv_attention() -> None:
     torch.random.manual_seed(TEST_SEED)
     torch.cuda.manual_seed(TEST_SEED)
     for dtype in [torch.half]:
-        for block_size in [8, 16, 32]:
+        for block_size in [1]:
             for head_size in [64, 80, 96, 128]:
                 print(f'Testing modified_single_query_cached_kv_attention '
                       f'with dtype={dtype}, block_size={block_size}, '

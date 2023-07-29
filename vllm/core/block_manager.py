@@ -38,19 +38,21 @@ class BlockAllocator:
         block.ref_count = 1
         return block
 
-    def free(self, block: PhysicalTokenBlock) -> None:
-        if block.ref_count == 0:
-            raise ValueError(f"Double free! {block} is already freed.")
-        block.ref_count -= 1
-        if block.ref_count == 0:
-            self.free_blocks.append(block)
+    def free(self, block: int) -> None:
+        self.free_blocks.append(PhysicalTokenBlock(device=self.device, block_number=block, block_size=self.block_size))
+        # if block.ref_count == 0:
+        #     raise ValueError(f"Double free! {block} is already freed.")
+        # block.ref_count -= 1
+        # if block.ref_count == 0:
+        #     self.free_blocks.append(block)
 
     def get_num_free_blocks(self) -> int:
         return len(self.free_blocks)
 
 
 # Mapping: logical block number -> physical block.
-BlockTable = List[PhysicalTokenBlock]
+# BlockTable = List[PhysicalTokenBlock]
+BlockTable = List[int]
 
 
 class BlockSpaceManager:
@@ -113,7 +115,7 @@ class BlockSpaceManager:
                     block = self.gpu_allocator.allocate()
                     # Set the reference counts of the token blocks.
                     block.ref_count = 1
-                    block_table.append(block)
+                    block_table.append(block.block_number)
                 # Assuming each sequence has an attribute num_layers
                 self.block_tables[seq.seq_id].append(block_table)
 
@@ -132,7 +134,7 @@ class BlockSpaceManager:
         for layer_id in range(self.num_layers):
             block = self.gpu_allocator.allocate()
             block_table = self.block_tables[seq.seq_id][layer_id]
-            block_table.append(block)
+            block_table.append(block.block_number)
         
         return None
 
@@ -207,7 +209,7 @@ class BlockSpaceManager:
                 else:
                     gpu_block = self.gpu_allocator.allocate()
                     mapping[cpu_block] = gpu_block
-                new_block_table.append(gpu_block)
+                new_block_table.append(gpu_block.block_number)
                 # Free the CPU block swapped in to GPU.
                 self.cpu_allocator.free(cpu_block)
             self.block_tables[seq.seq_id] = new_block_table
@@ -252,10 +254,11 @@ class BlockSpaceManager:
 
     def _free_block_table(self, block_table: BlockTable) -> None:
         for block in block_table:
-            if block.device == Device.GPU:
-                self.gpu_allocator.free(block)
-            else:
-                self.cpu_allocator.free(block)
+            self.gpu_allocator.free(block)
+            # if block.device == Device.GPU:
+            #     self.gpu_allocator.free(block)
+            # else:
+            #     self.cpu_allocator.free(block)
 
     def free(self, seq: Sequence) -> None:
         if seq.seq_id not in self.block_tables:
@@ -273,11 +276,12 @@ class BlockSpaceManager:
 
     def get_block_table_list(self, seq: Sequence) -> List[int]:
 
-        block_table_list = []
-        for block_table in self.block_tables[seq.seq_id]:
-            block_table_list.append([block.block_number for block in block_table])
+        return self.block_tables[seq.seq_id]
+        # block_table_list = []
+        # for block_table in self.block_tables[seq.seq_id]:
+        #     block_table_list.append([block.block_number for block in block_table])
 
-        return block_table_list
+        # return block_table_list
 
     def get_num_free_gpu_blocks(self) -> int:
         return self.gpu_allocator.get_num_free_blocks()
