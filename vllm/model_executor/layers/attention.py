@@ -4,8 +4,10 @@ from typing import List, Optional
 import torch
 import torch.nn as nn
 from xformers import ops as xops
-from xformers.ops.fmha.attn_bias import (BlockDiagonalCausalMask,
-                                         LowerTriangularMaskWithTensorBias)
+from xformers.ops.fmha.attn_bias import (
+    BlockDiagonalCausalMask,
+    LowerTriangularMaskWithTensorBias,
+)
 
 from vllm import attention_ops
 from vllm import cache_ops
@@ -52,11 +54,13 @@ class PagedAttention(nn.Module):
     5. Output a flattened 1D tensor.
     """
 
-    def __init__(self,
-                 num_heads: int,
-                 head_size: int,
-                 scale: float,
-                 num_kv_heads: Optional[int] = None) -> None:
+    def __init__(
+        self,
+        num_heads: int,
+        head_size: int,
+        scale: float,
+        num_kv_heads: Optional[int] = None,
+    ) -> None:
         super().__init__()
         self.num_heads = num_heads
         self.head_size = head_size
@@ -68,7 +72,8 @@ class PagedAttention(nn.Module):
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
         self.head_mapping = torch.repeat_interleave(
             torch.arange(self.num_kv_heads, dtype=torch.int32, device="cuda"),
-            self.num_queries_per_kv)
+            self.num_queries_per_kv,
+        )
 
         if self.head_size not in _SUPPORTED_HEAD_SIZES:
             raise ValueError(f"head_size ({self.head_size}) is not supported. "
@@ -215,8 +220,7 @@ class PagedAttention(nn.Module):
         # When key_cache and value_cache are not provided, the new key
         # and value vectors will not be cached.
         num_valid_tokens = input_metadata.num_valid_tokens
-        if (num_valid_tokens > 0 and key_cache is not None
-                and value_cache is not None):
+        if num_valid_tokens > 0 and key_cache is not None and value_cache is not None:
             # The stride is 3 because the key and value are sliced from qkv.
             cache_ops.reshape_and_cache(
                 key[:num_valid_tokens],
@@ -235,8 +239,11 @@ class PagedAttention(nn.Module):
             # Compute the attention op for generation tokens.
             self.single_query_cached_kv_attention(
                 output[num_prompt_tokens:num_valid_tokens],
-                query[num_prompt_tokens:num_valid_tokens], key_cache,
-                value_cache, input_metadata)
+                query[num_prompt_tokens:num_valid_tokens],
+                key_cache,
+                value_cache,
+                input_metadata,
+            )
 
         # Reshape the output tensor.
         # NOTE(woosuk): The output tensor may include paddings.
@@ -255,12 +262,16 @@ class PagedAttentionWithRoPE(PagedAttention):
         max_position: int = 8192,
         base: int = 10000,
         num_kv_heads: Optional[int] = None,
+        rope_scaling_factor: float = 1,
     ) -> None:
         super().__init__(num_heads, head_size, scale, num_kv_heads)
 
+        self.rope_scaling_factor = rope_scaling_factor
+        max_position = max_position * self.rope_scaling_factor
+
         # Create the cos and sin cache.
         inv_freq = 1.0 / (base**(torch.arange(0, rotary_dim, 2) / rotary_dim))
-        t = torch.arange(max_position).float()
+        t = torch.arange(max_position).float() / self.rope_scaling_factor
         freqs = torch.einsum("i,j -> ij", t, inv_freq.float())
         cos = freqs.cos()
         sin = freqs.sin()
@@ -285,7 +296,7 @@ class PagedAttentionWithRoPE(PagedAttention):
         input_metadata: InputMetadata,
         cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
-        """ PagedAttention forward pass with rotary embedding.
+        """PagedAttention forward pass with rotary embedding.
 
         Args:
             positions: shape = [num_tokens]
@@ -326,12 +337,14 @@ class PagedAttentionWithRoPE(PagedAttention):
 class PagedAttentionWithALiBi(PagedAttention):
     """PagedAttention with ALiBi attention bias."""
 
-    def __init__(self,
-                 num_heads: int,
-                 head_size: int,
-                 scale: float,
-                 slopes: List[float],
-                 num_kv_heads: Optional[int] = None) -> None:
+    def __init__(
+        self,
+        num_heads: int,
+        head_size: int,
+        scale: float,
+        slopes: List[float],
+        num_kv_heads: Optional[int] = None,
+    ) -> None:
         super().__init__(num_heads, head_size, scale, num_kv_heads)
         assert len(slopes) == num_heads
 

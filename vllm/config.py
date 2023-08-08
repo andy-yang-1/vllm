@@ -98,17 +98,15 @@ class ModelConfig:
         # Note: for falcon, when new_decoder_architecture is True, the
         # multi_query flag is ignored and we use n_head_kv for the number of
         # KV heads.
-        new_decoder_arch_falcon = (
-            self.hf_config.model_type == "falcon"
-            and getattr(self.hf_config, "new_decoder_architecture", False))
+        new_decoder_arch_falcon = self.hf_config.model_type == "falcon" and getattr(
+            self.hf_config, "new_decoder_architecture", False)
         if not new_decoder_arch_falcon and getattr(self.hf_config,
                                                    "multi_query", False):
             # Multi-query attention, only one KV head.
             return 1
         # For Falcon:
         if getattr(self.hf_config, "n_head_kv", None) is not None:
-            return (self.hf_config.n_head_kv //
-                    parallel_config.tensor_parallel_size)
+            return self.hf_config.n_head_kv // parallel_config.tensor_parallel_size
         # For LLaMA-2:
         if getattr(self.hf_config, "num_key_value_heads", None) is not None:
             return (self.hf_config.num_key_value_heads //
@@ -118,22 +116,29 @@ class ModelConfig:
 
     def get_max_model_len(self) -> int:
         max_model_len = float("inf")
-        possible_keys = [
-            # OPT
-            "max_position_embeddings",
-            # GPT-2
-            "n_positions",
-            # MPT
+        length_keys = [
             "max_seq_len",
-            # Others
             "max_sequence_length",
             "max_seq_length",
             "seq_len",
         ]
-        for key in possible_keys:
+        position_keys = [
+            # OPT
+            "max_position_embeddings",
+            # GPT-2
+            "n_positions",
+        ]
+        rope_scaling_factor = getattr(self.hf_config, "rope_scaling",
+                                      {}).get("factor", 1.0)
+        for key in length_keys:
             max_len_key = getattr(self.hf_config, key, None)
             if max_len_key is not None:
                 max_model_len = min(max_model_len, max_len_key)
+        for key in position_keys:
+            max_len_key = getattr(self.hf_config, key, None)
+            if max_len_key is not None:
+                max_model_len = min(max_model_len,
+                                    max_len_key * rope_scaling_factor)
         return max_model_len
 
     def get_num_layers(self, parallel_config: "ParallelConfig") -> int:

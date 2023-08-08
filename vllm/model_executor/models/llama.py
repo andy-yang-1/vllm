@@ -36,12 +36,19 @@ from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.attention import PagedAttentionWithRoPE
 from vllm.model_executor.layers.sampler import Sampler
-from vllm.model_executor.weight_utils import (hf_model_weights_iterator,
-                                              load_tensor_parallel_weights)
+from vllm.model_executor.weight_utils import (
+    hf_model_weights_iterator,
+    load_tensor_parallel_weights,
+)
 from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+)
 from vllm.model_executor.parallel_utils.tensor_parallel import (
-    VocabParallelEmbedding, ColumnParallelLinear, RowParallelLinear)
+    VocabParallelEmbedding,
+    ColumnParallelLinear,
+    RowParallelLinear,
+)
 from vllm.sequence import SequenceOutputs
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
@@ -56,16 +63,20 @@ class LlamaMLP(nn.Module):
         hidden_act: str,
     ):
         super().__init__()
-        self.gate_up_proj = ColumnParallelLinear(hidden_size,
-                                                 2 * intermediate_size,
-                                                 bias=False,
-                                                 gather_output=False,
-                                                 perform_initialization=False)
-        self.down_proj = RowParallelLinear(intermediate_size,
-                                           hidden_size,
-                                           bias=False,
-                                           input_is_parallel=True,
-                                           perform_initialization=False)
+        self.gate_up_proj = ColumnParallelLinear(
+            hidden_size,
+            2 * intermediate_size,
+            bias=False,
+            gather_output=False,
+            perform_initialization=False,
+        )
+        self.down_proj = RowParallelLinear(
+            intermediate_size,
+            hidden_size,
+            bias=False,
+            input_is_parallel=True,
+            perform_initialization=False,
+        )
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
                              "Only silu is supported for now.")
@@ -85,6 +96,8 @@ class LlamaAttention(nn.Module):
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
+        max_position: int = 8192,
+        rope_scaling_factor: float = 1,
     ):
         super().__init__()
         self.hidden_size = hidden_size
@@ -115,11 +128,15 @@ class LlamaAttention(nn.Module):
             input_is_parallel=True,
             perform_initialization=False,
         )
-        self.attn = PagedAttentionWithRoPE(self.num_heads,
-                                           self.head_dim,
-                                           self.scaling,
-                                           rotary_dim=self.head_dim,
-                                           num_kv_heads=self.num_kv_heads)
+        self.attn = PagedAttentionWithRoPE(
+            self.num_heads,
+            self.head_dim,
+            self.scaling,
+            rotary_dim=self.head_dim,
+            max_position=max_position,
+            num_kv_heads=self.num_kv_heads,
+            rope_scaling_factor=rope_scaling_factor,
+        )
 
     def forward(
         self,
@@ -143,10 +160,17 @@ class LlamaDecoderLayer(nn.Module):
     def __init__(self, config: LlamaConfig):
         super().__init__()
         self.hidden_size = config.hidden_size
+        if config.rope_scaling is None:
+            rope_scaling_factor = 1
+        else:
+            rope_scaling_factor = config.rope_scaling["factor"]
+        max_position = config.get("max_position_embeddings", 8192)
         self.self_attn = LlamaAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
             num_kv_heads=config.num_key_value_heads,
+            max_position=max_position,
+            rope_scaling_factor=rope_scaling_factor,
         )
         self.mlp = LlamaMLP(
             hidden_size=self.hidden_size,
@@ -235,11 +259,13 @@ class LlamaForCausalLM(nn.Module):
         self.config = config
         self.model = LlamaModel(config)
         vocab_size = ((config.vocab_size + 63) // 64) * 64
-        self.lm_head = ColumnParallelLinear(config.hidden_size,
-                                            vocab_size,
-                                            bias=False,
-                                            gather_output=False,
-                                            perform_initialization=False)
+        self.lm_head = ColumnParallelLinear(
+            config.hidden_size,
+            vocab_size,
+            bias=False,
+            gather_output=False,
+            perform_initialization=False,
+        )
         self.sampler = Sampler(config.vocab_size)
 
     def forward(
@@ -257,18 +283,23 @@ class LlamaForCausalLM(nn.Module):
         return next_tokens
 
     _column_parallel_weights = [
-        "embed_tokens.weight", "lm_head.weight", "qkv_proj.weight",
-        "gate_proj.weight", "up_proj.weight"
+        "embed_tokens.weight",
+        "lm_head.weight",
+        "qkv_proj.weight",
+        "gate_proj.weight",
+        "up_proj.weight",
     ]
     _row_parallel_weights = ["o_proj.weight", "down_proj.weight"]
 
-    def load_weights(self,
-                     model_name_or_path: str,
-                     cache_dir: Optional[str] = None,
-                     use_np_cache: bool = False):
+    def load_weights(
+        self,
+        model_name_or_path: str,
+        cache_dir: Optional[str] = None,
+        use_np_cache: bool = False,
+    ):
         tp_size = get_tensor_model_parallel_world_size()
         tensor_model_parallel_rank = get_tensor_model_parallel_rank()
-        q_proj_shard_size = (self.config.hidden_size // tp_size)
+        q_proj_shard_size = self.config.hidden_size // tp_size
         kv_proj_shard_size = (self.config.hidden_size //
                               self.config.num_attention_heads *
                               self.config.num_key_value_heads // tp_size)
@@ -289,7 +320,7 @@ class LlamaForCausalLM(nn.Module):
             if "embed_tokens" in name or "lm_head" in name:
                 param = state_dict[name]
                 # Consider padding in the vocab size.
-                padded_vocab_size = (param.shape[0] * tp_size)
+                padded_vocab_size = param.shape[0] * tp_size
                 num_extra_rows = padded_vocab_size - self.config.vocab_size
                 extra_rows = torch.empty(num_extra_rows,
                                          loaded_weight.shape[1])
@@ -333,7 +364,11 @@ class LlamaForCausalLM(nn.Module):
                 continue
 
             param = state_dict[name]
-            load_tensor_parallel_weights(param, loaded_weight, name,
-                                         self._column_parallel_weights,
-                                         self._row_parallel_weights,
-                                         tensor_model_parallel_rank)
+            load_tensor_parallel_weights(
+                param,
+                loaded_weight,
+                name,
+                self._column_parallel_weights,
+                self._row_parallel_weights,
+                tensor_model_parallel_rank,
+            )
